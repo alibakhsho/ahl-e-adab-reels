@@ -50,6 +50,23 @@ def init(src_path):
         SPRITES.append(im.crop(im.getbbox()))
 
 
+def melt(mask, t, seed, amount=0.6, wave=0.12):
+    """Wavy + dripping version of an L-mode sprite: rows wobble sideways, columns drip down."""
+    a = np.asarray(mask, np.float32)
+    h, w = a.shape
+    A = int(wave * w) + 2
+    drip = int(amount * h) + 2
+    ys, xs = np.mgrid[0:h + drip, 0:w + 2 * A].astype(np.float32)
+    sx = xs - A - A * np.sin(ys / (h * 0.22) + t * 7 + seed)
+    col = np.clip(sx, 0, w - 1)
+    noise = np.clip(np.sin(col * 0.19 + seed) * np.sin(col * 0.053 + seed * 2.3 + t * 1.5), 0, 1)
+    d = amount * h * (0.15 + 0.85 * noise)
+    sy = ys / (1 + (d / h) * (ys / (h + drip)) * 2.2)
+    ok = (sx >= 0) & (sx < w) & (sy >= 0) & (sy < h)
+    out = np.where(ok, a[np.clip(sy, 0, h - 1).astype(int), np.clip(sx, 0, w - 1).astype(int)], 0)
+    return Image.fromarray(out.astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8))
+
+
 def beat_at(t):
     return t / BEAT
 
@@ -132,20 +149,20 @@ def draw_searchlights(t, b, cam):
         r = 72 + 10 * math.sin(ph * 1.3)
         ang = math.atan2(ty - base[1], tx - base[0])
         nx, ny = -math.sin(ang), math.cos(ang)
-        dc.polygon([(base[0] - nx * 6, base[1] - ny * 6), (base[0] + nx * 6, base[1] + ny * 6),
-                    (tx + nx * r, ty + ny * r * 0.8), (tx - nx * r, ty - ny * r * 0.8)], fill=60)
-        dd.ellipse([tx - r, ty - r * 0.8, tx + r, ty + r * 0.8], fill=255)
-        # original emblem: a big eighth note silhouette in the beam
-        sp = SPRITES[1].resize((int(r * 1.0), int(r * 1.0 * SPRITES[1].height / SPRITES[1].width)))
-        sp = sp.rotate(math.degrees(math.sin(ph)) * 12, expand=True)
-        gobo.paste(255, (int(tx - sp.width / 2), int(ty - sp.height / 2)), sp)
+        cw = r * 0.45
+        dc.polygon([(base[0] - nx * 4, base[1] - ny * 4), (base[0] + nx * 4, base[1] + ny * 4),
+                    (tx + nx * cw, ty + ny * cw), (tx - nx * cw, ty - ny * cw)], fill=45)
+        # the beam lands as a giant melting music note (no circle)
+        src = SPRITES[(k + int(b // 4)) % 4]
+        hh = int(r * 1.9)
+        sp = src.resize((max(1, int(hh * src.width / src.height)), hh), Image.BILINEAR)
+        sp = melt(sp, t, k * 3.1, amount=0.45, wave=0.10)
+        sp = sp.rotate(math.degrees(math.sin(ph)) * 15, expand=True, resample=Image.BILINEAR)
+        disc.paste(255, (int(tx - sp.width / 2), int(ty - sp.height * 0.35)), sp)
     cone = cone.filter(ImageFilter.GaussianBlur(10))
-    disc = disc.filter(ImageFilter.GaussianBlur(3))
-    gobo = gobo.filter(ImageFilter.GaussianBlur(1.5))
+    disc = disc.filter(ImageFilter.GaussianBlur(1.2))
     c = np.asarray(cone.resize((W, H), Image.BILINEAR), np.float32) / 255
     d = np.asarray(disc.resize((W, H), Image.BILINEAR), np.float32) / 255
-    g = np.asarray(gobo.resize((W, H), Image.BILINEAR), np.float32) / 255
-    d = d * (1 - 0.85 * g)
     return c * inten, d * inten
 
 
@@ -178,6 +195,8 @@ def draw_lasers(t, b, cam):
     converge = sec == "drop" and bar == 6  # tunnel: beams meet over the stage
     s = cam[0] / 2
     target = to_out(MANDALA_C, cam)
+    kickenv = env_since_beat(t, 8) if 8 <= b < 32 else 0
+    wob = {"intro": 6, "groove": 16, "drop": 26, "outro": 14}[sec] * (1 + 1.2 * kickenv)
     for ei in emitters:
         ex, ey = to_out(EMITTERS[ei], cam)
         ex, ey = ex / 2, ey / 2
@@ -192,13 +211,25 @@ def draw_lasers(t, b, cam):
             hsel = pal[(i + ei) % len(pal)]
             col = hsv(t * 0.5 + i / fan) if hsel == "rainbow" else hsv(hsel)
             col = tuple(int(255 * c) for c in col)
-            L = 2500
-            dr.line([(ex, ey), (ex + L * math.cos(ang), ey + L * math.sin(ang))], fill=col, width=2)
+            L = 1500
+            ca, sa = math.cos(ang), math.sin(ang)
+            pts = []
+            for d in range(0, L + 1, 18):
+                u = d / L
+                off_w = wob * (u ** 0.8) * math.sin(d / (70 + 25 * (i % 3)) - t * 9 + ei * 2.1 + i)
+                off_w += wob * 0.5 * u * math.sin(d / 23 + t * 13 + i * 0.7)
+                pts.append((ex + ca * d - sa * off_w, ey + sa * d + ca * off_w))
+            dr.line(pts, fill=col, width=2, joint="curve")
         dr.ellipse([ex - 4, ey - 4, ex + 4, ey + 4], fill=(255, 255, 255))
     glow = layer.filter(ImageFilter.GaussianBlur(5))
     a = np.asarray(layer, np.float32) / 255
     g = np.asarray(glow, np.float32) / 255
     out = a * 0.9 + g * 2.2
+    # liquid warp over the whole laser layer
+    rows = np.arange(HH)
+    sh = (wob * 0.6 * np.sin(rows / 31.0 + t * 5)).astype(int)
+    idx = (np.arange(HW)[None, :] - sh[:, None]) % HW
+    out = np.take_along_axis(out, idx[..., None].repeat(3, 2), axis=1)
     if flick:
         out *= 0.8
     return np.asarray(Image.fromarray(np.clip(out * 255, 0, 255).astype(np.uint8)).resize((W, H), Image.BILINEAR),
@@ -245,7 +276,9 @@ def draw_notes(t, cam, core, glowlayer):
         sp = SPRITES[p["sprite"]]
         h = int(size)
         w = max(1, int(size * sp.width / sp.height))
-        im = sp.resize((w, h), Image.BILINEAR).rotate(p["spin"] * age, expand=True, resample=Image.BILINEAR)
+        im = melt(sp.resize((w, h), Image.BILINEAR), t, p["hue"] * 20, amount=0.15 + 0.5 * min(1, age / 1.5),
+                  wave=0.14)
+        im = im.rotate(math.sin(age * 3 + p["hue"] * 6) * p["spin"] * 0.15, expand=True, resample=Image.BILINEAR)
         col = hsv(p["hue"] + t * 0.4, 0.85, 1.0)
         m = np.asarray(im, np.float32) / 255 * alpha
         x0, y0 = int(x - im.width / 2), int(y - im.height / 2)
@@ -287,7 +320,7 @@ def draw_geometry(t, b, cam):
                 continue
             r = 40 + 900 * age
             col = tuple(int(255 * c * (1 - age / 0.7) * 0.8) for c in hsv(bb * 0.13))
-            dr.ellipse([dx - r, dy - r * 0.45, dx + r, dy + r * 0.45], outline=col, width=3)
+            pass  # beat rings removed: notes only, no circles
     if not any_:
         return None
     glow = layer.filter(ImageFilter.GaussianBlur(3))
@@ -352,7 +385,8 @@ def render_frame(fi):
     # searchlights
     cone, disc = draw_searchlights(t, b, cam)
     warm = np.array([1.0, 0.95, 0.85], np.float32)
-    f = f + cone[..., None] * 0.35 * warm + f * disc[..., None] * 1.6 + disc[..., None] * 0.18 * warm
+    spot = np.array(hsv(t * 0.25, 0.35, 1.0), np.float32)
+    f = f + cone[..., None] * 0.35 * warm + f * disc[..., None] * 1.4 + disc[..., None] * 0.45 * spot
 
     geo = draw_geometry(t, b, cam)
     if geo is not None:
